@@ -422,6 +422,11 @@ class GaussianDiffusion(nn.Module):
         register_buffer('posterior_mean_coef2', (1. - alphas_cumprod_prev) * torch.sqrt(alphas) / (1. - alphas_cumprod))
 
     def predict_start_from_noise(self, x_t, t, noise):
+        print("self.sqrt_recip_alphas_cumprod -->",self.sqrt_recip_alphas_cumprod)
+        print("self.sqrt_recipm1_alphas_cumprod -->", self.sqrt_recipm1_alphas_cumprod)
+        print("t",t)
+        print("t shape", t.shape)
+        print("x_t-->",x_t)
         return (
             extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
             extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
