@@ -20,7 +20,6 @@ from einops.layers.torch import Rearrange
 
 
 from google.colab import files
-import git 
 
 # helpers functions
 
