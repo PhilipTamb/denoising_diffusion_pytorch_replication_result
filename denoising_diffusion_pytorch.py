@@ -667,9 +667,9 @@ class Trainer(object):
                     for j in range(len(all_images_list)):
                         utils.save_image(all_images_list[j], str(self.results_folder / f'sample-{j}-{self.step}.png'), nrow = 6)
                         #utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = 6)
-                        #self.save(j)
+                        self.save(j)
                     #self.save(milestone)
-                    self.save(j)
+                    #self.save(j)
 
 
                 self.step += 1
