@@ -532,9 +532,20 @@ class GaussianDiffusion(nn.Module):
 
     def forward(self, img, *args, **kwargs):
         b, c, h, w, device, img_size, = *img.shape, img.device, self.image_size
+        print("img shape --> ", img.shape)
+        print("img.device --> ", img.device)
+        print("self.image_size --> ", self.image_size)
+        print("type img", type(img))
+        print(" b ->", b )
+        print(" b type ->", type(b) )
+        print("h ->",h)
+        print("h type ->",type(h)) 
+        print("w ->", w)
+        
         assert h == img_size and w == img_size, f'height and width of image must be {img_size}'
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
-        print(t.shape)
+        print("t shape ->", t.shape)
+        print("self.num_timesteps, ->", self.num_timesteps,)
 
         img = normalize_to_neg_one_to_one(img)
         return self.p_losses(img, t, *args, **kwargs)
