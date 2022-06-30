@@ -579,7 +579,7 @@ class Trainer(object):
         amp = False,
         step_start_ema = 2000,
         update_ema_every = 10,
-        save_and_sample_every = 1000,
+        save_and_sample_every = 3000,
         results_folder = './results',
         augment_horizontal_flip = True
     ):
@@ -638,8 +638,9 @@ class Trainer(object):
         self.scaler.load_state_dict(data['scaler'])
 
     def train(self):
+        count= 0
         with tqdm(initial = self.step, total = self.train_num_steps) as pbar:
-
+    
             while self.step < self.train_num_steps:
                 for i in range(self.gradient_accumulate_every):
                     data = next(self.dl).cuda()
@@ -667,9 +668,10 @@ class Trainer(object):
                     for j in range(len(all_images_list)):
                         utils.save_image(all_images_list[j], str(self.results_folder / f'sample-{j}-{self.step}.png'), nrow = 6)
                         #utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = 6)
-                        self.save(j)
+                        #self.save(j)
                     #self.save(milestone)
-                    #self.save(j)
+                    self.save(count)
+                    count= count+1
 
 
                 self.step += 1
