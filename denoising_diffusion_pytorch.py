@@ -18,6 +18,8 @@ from tqdm import tqdm
 from einops import rearrange
 from einops.layers.torch import Rearrange
 
+from google.colab import files
+
 # helpers functions
 
 def exists(x):
@@ -468,7 +470,7 @@ class GaussianDiffusion(nn.Module):
         b = shape[0]
         img = torch.randn(shape, device=device)
 
-        for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step {i} :', total=self.num_timesteps):
+        for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
             img = self.p_sample(img, torch.full((b,), i, device=device, dtype=torch.long))
 
         img = unnormalize_to_zero_to_one(img)
@@ -628,6 +630,9 @@ class Trainer(object):
             'scaler': self.scaler.state_dict()
         }
         torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
+        for j in range(20):
+            files.download('/content/results/sample-{j}-{self.step}.png')
+        files.download('/content/results/model-{milestone}.pt')
 
     def load(self, milestone):
         data = torch.load(str(self.results_folder / f'model-{milestone}.pt'))
@@ -665,12 +670,10 @@ class Trainer(object):
                     all_images_list = list(map(lambda n: self.ema_model.sample(batch_size=n), batches))
                     #all_images = torch.cat(all_images_list, dim=0)
                     for j in range(len(all_images_list)):
-                        print("Step: ", self.step , "iteration: ", j )
                         utils.save_image(all_images_list[j], str(self.results_folder / f'sample-{j}-{self.step}.png'), nrow = 6)
                         #utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = 6)
                         self.save(j)
                     #self.save(milestone)
-
                 self.step += 1
                 pbar.update(1)
 
