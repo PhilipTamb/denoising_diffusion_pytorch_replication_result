@@ -630,9 +630,7 @@ class Trainer(object):
             'scaler': self.scaler.state_dict()
         }
         torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
-        for j in range(20):
-            files.download('/content/results/sample-{j}-{self.step}.png')
-        files.download('/content/results/model-{milestone}.pt')
+        files.download(f'/content/results/model-{milestone}.pt')
 
     def load(self, milestone):
         data = torch.load(str(self.results_folder / f'model-{milestone}.pt'))
@@ -673,6 +671,7 @@ class Trainer(object):
                         utils.save_image(all_images_list[j], str(self.results_folder / f'sample-{j}-{self.step}.png'), nrow = 6)
                         #utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = 6)
                         self.save(j)
+                        files.download(f'/content/results/sample-{j}-{self.step}.png')
                     #self.save(milestone)
                 self.step += 1
                 pbar.update(1)
