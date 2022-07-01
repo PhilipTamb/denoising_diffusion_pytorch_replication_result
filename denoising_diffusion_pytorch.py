@@ -18,9 +18,6 @@ from tqdm import tqdm
 from einops import rearrange
 from einops.layers.torch import Rearrange
 
-
-from google.colab import files
-
 # helpers functions
 
 def exists(x):
@@ -631,7 +628,6 @@ class Trainer(object):
             'scaler': self.scaler.state_dict()
         }
         torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
-        files.download('/content/results/model-{milestone}.pt')
 
     def load(self, milestone):
         data = torch.load(str(self.results_folder / f'model-{milestone}.pt'))
@@ -669,12 +665,11 @@ class Trainer(object):
                     all_images_list = list(map(lambda n: self.ema_model.sample(batch_size=n), batches))
                     #all_images = torch.cat(all_images_list, dim=0)
                     for j in range(len(all_images_list)):
+                        print("Step: ", self.step , "iteration: ", j )
                         utils.save_image(all_images_list[j], str(self.results_folder / f'sample-{j}-{self.step}.png'), nrow = 6)
                         #utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = 6)
-                        files.download('/content/results/sample-{j}-{self.step}.png')
-                        #self.save(j)
-                    self.save(milestone)
-
+                        self.save(j)
+                    #self.save(milestone)
 
                 self.step += 1
                 pbar.update(1)
