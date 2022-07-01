@@ -18,6 +18,9 @@ from tqdm import tqdm
 from einops import rearrange
 from einops.layers.torch import Rearrange
 
+
+from google.colab import files
+
 # helpers functions
 
 def exists(x):
@@ -579,7 +582,7 @@ class Trainer(object):
         amp = False,
         step_start_ema = 2000,
         update_ema_every = 10,
-        save_and_sample_every = 3000,
+        save_and_sample_every = 1000,
         results_folder = './results',
         augment_horizontal_flip = True
     ):
@@ -628,6 +631,7 @@ class Trainer(object):
             'scaler': self.scaler.state_dict()
         }
         torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
+        files.download('/content/results/model-{milestone}.pt')
 
     def load(self, milestone):
         data = torch.load(str(self.results_folder / f'model-{milestone}.pt'))
@@ -638,9 +642,8 @@ class Trainer(object):
         self.scaler.load_state_dict(data['scaler'])
 
     def train(self):
-        count= 0
         with tqdm(initial = self.step, total = self.train_num_steps) as pbar:
-    
+
             while self.step < self.train_num_steps:
                 for i in range(self.gradient_accumulate_every):
                     data = next(self.dl).cuda()
@@ -668,10 +671,9 @@ class Trainer(object):
                     for j in range(len(all_images_list)):
                         utils.save_image(all_images_list[j], str(self.results_folder / f'sample-{j}-{self.step}.png'), nrow = 6)
                         #utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = 6)
+                        files.download('/content/results/sample-{j}-{self.step}.png')
                         #self.save(j)
-                    #self.save(milestone)
-                    self.save(count)
-                    count= count+1
+                    self.save(milestone)
 
 
                 self.step += 1
