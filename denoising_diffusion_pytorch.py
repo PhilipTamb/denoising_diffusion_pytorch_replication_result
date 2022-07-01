@@ -670,8 +670,8 @@ class Trainer(object):
                         print(f"all_images_list[{j}]",all_images_list[j])
                         utils.save_image(all_images_list[j], str(self.results_folder / f'sample-{j}-{self.step}.png'), nrow = 1)
                         #utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = 6)
-                        self.save(j)
-                    #self.save(milestone)
+                        #self.save(j)
+                    self.save(milestone)
                 self.step += 1
                 pbar.update(1)
 
