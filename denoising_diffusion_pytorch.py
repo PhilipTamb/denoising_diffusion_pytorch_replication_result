@@ -668,13 +668,17 @@ class Trainer(object):
 
                 if self.step != 0 and self.step % self.save_and_sample_every == 0:
                     self.ema.ema_model.eval()
-                    with torch.no_grad():
-                        milestone = self.step // self.save_and_sample_every
-                        batches = num_to_groups(36, self.batch_size)
-                        all_images_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=n), batches))
-
-                    all_images = torch.cat(all_images_list, dim=0)
-                    utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = 6)
+                    #with torch.no_grad():
+                    milestone = self.step // self.save_and_sample_every
+                    #batches = num_to_groups(36, self.batch_size)
+                    batches = num_to_groups(20,1)
+                    all_images_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=n), batches))
+                    for j in range(len(all_images_list)):
+                        print(f"all_images_list[{j}]",all_images_list[j])
+                        utils.save_image(all_images_list[j], str(self.results_folder / f'sample-{j}-{self.step}.png'), nrow = 1)
+                        #utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = 6)
+                    #all_images = torch.cat(all_images_list, dim=0)
+                    #utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = 6)
                     self.save(milestone)
 
                 self.step += 1
