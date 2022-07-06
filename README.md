@@ -3,4 +3,4 @@ This repository was created to test and replicate the results of this paper (htt
 
 https://github.com/GaParmar/clean-fid
 
-https://github.com/GaParmar/clean-fid
+https://github.com/sbarratt/inception-score-pytorch/blob/master/inception_score.py
