@@ -601,7 +601,7 @@ class Trainer(object):
         step_start_ema = 2000,
         ema_update_every = 10,
         save_and_sample_every = 1000,
-        results_folder = './results',
+        results_folder = './risultati',
         augment_horizontal_flip = True
     ):
         super().__init__()
@@ -671,7 +671,7 @@ class Trainer(object):
                     #with torch.no_grad():
                     milestone = self.step // self.save_and_sample_every
                     #batches = num_to_groups(36, self.batch_size)
-                    batches = num_to_groups(20,1)
+                    batches = num_to_groups(1500,1)
                     all_images_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=n), batches))
                     for j in range(len(all_images_list)):
                         # print(f"all_images_list[{j}]",all_images_list[j])
