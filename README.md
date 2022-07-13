@@ -6,3 +6,5 @@ https://github.com/GaParmar/clean-fid
 https://github.com/sbarratt/inception-score-pytorch/blob/master/inception_score.py
 
 https://huggingface.co/blog/annotated-diffusion
+
+https://github.com/lucidrains/denoising-diffusion-pytorch
