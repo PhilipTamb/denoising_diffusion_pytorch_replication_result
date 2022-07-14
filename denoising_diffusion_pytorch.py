@@ -7,7 +7,6 @@ from inspect import isfunction
 from functools import partial
 
 from torch.utils import data
-from multiprocessing import cpu_count
 from torch.cuda.amp import autocast, GradScaler
 
 from pathlib import Path
@@ -15,11 +14,9 @@ from torch.optim import Adam
 from torchvision import transforms, utils
 from PIL import Image
 
-from einops import rearrange, reduce
+from tqdm import tqdm
+from einops import rearrange
 from einops.layers.torch import Rearrange
-
-from tqdm.auto import tqdm
-from ema_pytorch import EMA
 
 # helpers functions
 
@@ -52,6 +49,21 @@ def unnormalize_to_zero_to_one(t):
 
 # small helper modules
 
+class EMA():
+    def __init__(self, beta):
+        super().__init__()
+        self.beta = beta
+
+    def update_model_average(self, ma_model, current_model):
+        for current_params, ma_params in zip(current_model.parameters(), ma_model.parameters()):
+            old_weight, up_weight = ma_params.data, current_params.data
+            ma_params.data = self.update_average(old_weight, up_weight)
+
+    def update_average(self, old, new):
+        if old is None:
+            return new
+        return old * self.beta + (1 - self.beta) * new
+
 class Residual(nn.Module):
     def __init__(self, fn):
         super().__init__()
@@ -60,14 +72,25 @@ class Residual(nn.Module):
     def forward(self, x, *args, **kwargs):
         return self.fn(x, *args, **kwargs) + x
 
-def Upsample(dim, dim_out = None):
-    return nn.Sequential(
-        nn.Upsample(scale_factor = 2, mode = 'nearest'),
-        nn.Conv2d(dim, default(dim_out, dim), 3, padding = 1)
-    )
+class SinusoidalPosEmb(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
 
-def Downsample(dim, dim_out = None):
-    return nn.Conv2d(dim, default(dim_out, dim), 4, 2, 1)
+    def forward(self, x):
+        device = x.device
+        half_dim = self.dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        emb = x[:, None] * emb[None, :]
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        return emb
+
+def Upsample(dim):
+    return nn.ConvTranspose2d(dim, dim, 4, 2, 1)
+
+def Downsample(dim):
+    return nn.Conv2d(dim, dim, 4, 2, 1)
 
 class LayerNorm(nn.Module):
     def __init__(self, dim, eps = 1e-5):
@@ -90,39 +113,6 @@ class PreNorm(nn.Module):
     def forward(self, x):
         x = self.norm(x)
         return self.fn(x)
-
-# sinusoidal positional embeds
-
-class SinusoidalPosEmb(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, x):
-        device = x.device
-        half_dim = self.dim // 2
-        emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        emb = x[:, None] * emb[None, :]
-        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
-        return emb
-
-class LearnedSinusoidalPosEmb(nn.Module):
-    """ following @crowsonkb 's lead with learned sinusoidal pos emb """
-    """ https://github.com/crowsonkb/v-diffusion-jax/blob/master/diffusion/models/danbooru_128.py#L8 """
-
-    def __init__(self, dim):
-        super().__init__()
-        assert (dim % 2) == 0
-        half_dim = dim // 2
-        self.weights = nn.Parameter(torch.randn(half_dim))
-
-    def forward(self, x):
-        x = rearrange(x, 'b -> b 1')
-        freqs = x * rearrange(self.weights, 'd -> 1 d') * 2 * math.pi
-        fouriered = torch.cat((freqs.sin(), freqs.cos()), dim = -1)
-        fouriered = torch.cat((x, fouriered), dim = -1)
-        return fouriered
 
 # building block modules
 
@@ -167,7 +157,6 @@ class ResnetBlock(nn.Module):
         h = self.block1(x, scale_shift = scale_shift)
 
         h = self.block2(h)
-
         return h + self.res_conv(x)
 
 class LinearAttention(nn.Module):
@@ -223,6 +212,18 @@ class Attention(nn.Module):
 
 # model
 
+def MLP(dim_in, dim_hidden):
+    return nn.Sequential(
+        Rearrange('... -> ... 1'),
+        nn.Linear(1, dim_hidden),
+        nn.GELU(),
+        nn.LayerNorm(dim_hidden),
+        nn.Linear(dim_hidden, dim_hidden),
+        nn.GELU(),
+        nn.LayerNorm(dim_hidden),
+        nn.Linear(dim_hidden, dim_hidden)
+    )
+
 class Unet(nn.Module):
     def __init__(
         self,
@@ -233,8 +234,7 @@ class Unet(nn.Module):
         channels = 3,
         resnet_block_groups = 8,
         learned_variance = False,
-        learned_sinusoidal_cond = False,
-        learned_sinusoidal_dim = 16
+        sinusoidal_cond_mlp = True
     ):
         super().__init__()
 
@@ -242,7 +242,7 @@ class Unet(nn.Module):
 
         self.channels = channels
 
-        init_dim = default(init_dim, dim)
+        init_dim = default(init_dim, dim // 3 * 2)
         self.init_conv = nn.Conv2d(channels, init_dim, 7, padding = 3)
 
         dims = [init_dim, *map(lambda m: dim * m, dim_mults)]
@@ -254,21 +254,17 @@ class Unet(nn.Module):
 
         time_dim = dim * 4
 
-        self.learned_sinusoidal_cond = learned_sinusoidal_cond
+        self.sinusoidal_cond_mlp = sinusoidal_cond_mlp
 
-        if learned_sinusoidal_cond:
-            sinu_pos_emb = LearnedSinusoidalPosEmb(learned_sinusoidal_dim)
-            fourier_dim = learned_sinusoidal_dim + 1
+        if sinusoidal_cond_mlp:
+            self.time_mlp = nn.Sequential(
+                SinusoidalPosEmb(dim),
+                nn.Linear(dim, time_dim),
+                nn.GELU(),
+                nn.Linear(time_dim, time_dim)
+            )
         else:
-            sinu_pos_emb = SinusoidalPosEmb(dim)
-            fourier_dim = dim
-
-        self.time_mlp = nn.Sequential(
-            sinu_pos_emb,
-            nn.Linear(fourier_dim, time_dim),
-            nn.GELU(),
-            nn.Linear(time_dim, time_dim)
-        )
+            self.time_mlp = MLP(1, time_dim)
 
         # layers
 
@@ -280,10 +276,10 @@ class Unet(nn.Module):
             is_last = ind >= (num_resolutions - 1)
 
             self.downs.append(nn.ModuleList([
-                block_klass(dim_in, dim_in, time_emb_dim = time_dim),
-                block_klass(dim_in, dim_in, time_emb_dim = time_dim),
-                Residual(PreNorm(dim_in, LinearAttention(dim_in))),
-                Downsample(dim_in, dim_out) if not is_last else nn.Conv2d(dim_in, dim_out, 3, padding = 1)
+                block_klass(dim_in, dim_out, time_emb_dim = time_dim),
+                block_klass(dim_out, dim_out, time_emb_dim = time_dim),
+                Residual(PreNorm(dim_out, LinearAttention(dim_out))),
+                Downsample(dim_out) if not is_last else nn.Identity()
             ]))
 
         mid_dim = dims[-1]
@@ -291,38 +287,35 @@ class Unet(nn.Module):
         self.mid_attn = Residual(PreNorm(mid_dim, Attention(mid_dim)))
         self.mid_block2 = block_klass(mid_dim, mid_dim, time_emb_dim = time_dim)
 
-        for ind, (dim_in, dim_out) in enumerate(reversed(in_out)):
-            is_last = ind == (len(in_out) - 1)
+        for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
+            is_last = ind >= (num_resolutions - 1)
 
             self.ups.append(nn.ModuleList([
-                block_klass(dim_out + dim_in, dim_out, time_emb_dim = time_dim),
-                block_klass(dim_out + dim_in, dim_out, time_emb_dim = time_dim),
-                Residual(PreNorm(dim_out, LinearAttention(dim_out))),
-                Upsample(dim_out, dim_in) if not is_last else  nn.Conv2d(dim_out, dim_in, 3, padding = 1)
+                block_klass(dim_out * 2, dim_in, time_emb_dim = time_dim),
+                block_klass(dim_in, dim_in, time_emb_dim = time_dim),
+                Residual(PreNorm(dim_in, LinearAttention(dim_in))),
+                Upsample(dim_in) if not is_last else nn.Identity()
             ]))
 
         default_out_dim = channels * (1 if not learned_variance else 2)
         self.out_dim = default(out_dim, default_out_dim)
 
-        self.final_res_block = block_klass(dim * 2, dim, time_emb_dim = time_dim)
-        self.final_conv = nn.Conv2d(dim, self.out_dim, 1)
+        self.final_conv = nn.Sequential(
+            block_klass(dim, dim),
+            nn.Conv2d(dim, self.out_dim, 1)
+        )
 
     def forward(self, x, time):
         x = self.init_conv(x)
-        r = x.clone()
-
         t = self.time_mlp(time)
 
         h = []
 
         for block1, block2, attn, downsample in self.downs:
             x = block1(x, t)
-            h.append(x)
-
             x = block2(x, t)
             x = attn(x)
             h.append(x)
-
             x = downsample(x)
 
         x = self.mid_block1(x, t)
@@ -330,18 +323,12 @@ class Unet(nn.Module):
         x = self.mid_block2(x, t)
 
         for block1, block2, attn, upsample in self.ups:
-            x = torch.cat((x, h.pop()), dim = 1)
+            x = torch.cat((x, h.pop()), dim=1)
             x = block1(x, t)
-
-            x = torch.cat((x, h.pop()), dim = 1)
             x = block2(x, t)
             x = attn(x)
-
             x = upsample(x)
 
-        x = torch.cat((x, r), dim = 1)
-
-        x = self.final_res_block(x, t)
         return self.final_conv(x)
 
 # gaussian diffusion trainer class
@@ -364,7 +351,7 @@ def cosine_beta_schedule(timesteps, s = 0.008):
     """
     steps = timesteps + 1
     x = torch.linspace(0, timesteps, steps, dtype = torch.float64)
-    alphas_cumprod = torch.cos(((x / timesteps) + s) / (1 + s) * math.pi * 0.5) ** 2
+    alphas_cumprod = torch.cos(((x / timesteps) + s) / (1 + s) * torch.pi * 0.5) ** 2
     alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
     betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
     return torch.clip(betas, 0, 0.999)
@@ -379,9 +366,7 @@ class GaussianDiffusion(nn.Module):
         timesteps = 1000,
         loss_type = 'l1',
         objective = 'pred_noise',
-        beta_schedule = 'cosine',
-        p2_loss_weight_gamma = 0., # p2 loss weight, from https://arxiv.org/abs/2204.00227 - 0 is equivalent to weight of 1 across time - 1. is recommended
-        p2_loss_weight_k = 1
+        beta_schedule = 'cosine'
     ):
         super().__init__()
         assert not (type(self) == GaussianDiffusion and denoise_fn.channels != denoise_fn.out_dim)
@@ -435,10 +420,6 @@ class GaussianDiffusion(nn.Module):
         register_buffer('posterior_log_variance_clipped', torch.log(posterior_variance.clamp(min =1e-20)))
         register_buffer('posterior_mean_coef1', betas * torch.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod))
         register_buffer('posterior_mean_coef2', (1. - alphas_cumprod_prev) * torch.sqrt(alphas) / (1. - alphas_cumprod))
-
-        # calculate p2 reweighting
-
-        register_buffer('p2_loss_weight', (p2_loss_weight_k + alphas_cumprod / (1 - alphas_cumprod)) ** -p2_loss_weight_gamma)
 
     def predict_start_from_noise(self, x_t, t, noise):
         return (
@@ -546,11 +527,8 @@ class GaussianDiffusion(nn.Module):
         else:
             raise ValueError(f'unknown objective {self.objective}')
 
-        loss = self.loss_fn(model_out, target, reduction = 'none')
-        loss = reduce(loss, 'b ... -> b (...)', 'mean')
-
-        loss = loss * extract(self.p2_loss_weight, t, loss.shape)
-        return loss.mean()
+        loss = self.loss_fn(model_out, target)
+        return loss
 
     def forward(self, img, *args, **kwargs):
         b, c, h, w, device, img_size, = *img.shape, img.device, self.image_size
@@ -593,22 +571,23 @@ class Trainer(object):
         folder,
         *,
         ema_decay = 0.995,
+        image_size = 128,
         train_batch_size = 32,
         train_lr = 1e-4,
         train_num_steps = 100000,
         gradient_accumulate_every = 2,
         amp = False,
         step_start_ema = 2000,
-        ema_update_every = 10,
+        update_ema_every = 10,
         save_and_sample_every = 1000,
-        results_folder = './risultati',
+        results_folder = './results',
         augment_horizontal_flip = True
     ):
         super().__init__()
-        self.image_size = diffusion_model.image_size
-
         self.model = diffusion_model
-        self.ema = EMA(diffusion_model, beta = ema_decay, update_every = ema_update_every)
+        self.ema = EMA(ema_decay)
+        self.ema_model = copy.deepcopy(self.model)
+        self.update_ema_every = update_ema_every
 
         self.step_start_ema = step_start_ema
         self.save_and_sample_every = save_and_sample_every
@@ -618,9 +597,9 @@ class Trainer(object):
         self.gradient_accumulate_every = gradient_accumulate_every
         self.train_num_steps = train_num_steps
 
-        self.ds = Dataset(folder, self.image_size, augment_horizontal_flip = augment_horizontal_flip)
-        self.dl = cycle(data.DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = cpu_count()))
-        self.opt = Adam(diffusion_model.parameters(), lr = train_lr)
+        self.ds = Dataset(folder, image_size, augment_horizontal_flip = augment_horizontal_flip)
+        self.dl = cycle(data.DataLoader(self.ds, batch_size = train_batch_size, shuffle=True, pin_memory=True))
+        self.opt = Adam(diffusion_model.parameters(), lr=train_lr)
 
         self.step = 0
 
@@ -630,11 +609,22 @@ class Trainer(object):
         self.results_folder = Path(results_folder)
         self.results_folder.mkdir(exist_ok = True)
 
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        self.ema_model.load_state_dict(self.model.state_dict())
+
+    def step_ema(self):
+        if self.step < self.step_start_ema:
+            self.reset_parameters()
+            return
+        self.ema.update_model_average(self.ema_model, self.model)
+
     def save(self, milestone):
         data = {
             'step': self.step,
             'model': self.model.state_dict(),
-            'ema': self.ema.state_dict(),
+            'ema': self.ema_model.state_dict(),
             'scaler': self.scaler.state_dict()
         }
         torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
@@ -644,7 +634,7 @@ class Trainer(object):
 
         self.step = data['step']
         self.model.load_state_dict(data['model'])
-        self.ema.load_state_dict(data['ema'])
+        self.ema_model.load_state_dict(data['ema'])
         self.scaler.load_state_dict(data['scaler'])
 
     def train(self):
@@ -664,23 +654,24 @@ class Trainer(object):
                 self.scaler.update()
                 self.opt.zero_grad()
 
-                self.ema.update()
+                if self.step % self.update_ema_every == 0:
+                    self.step_ema()
 
                 if self.step != 0 and self.step % self.save_and_sample_every == 0:
-                    self.ema.ema_model.eval()
-                    #with torch.no_grad():
-                    milestone = self.step // self.save_and_sample_every
-                    #batches = num_to_groups(36, self.batch_size)
-                    batches = num_to_groups(100,1)
-                    all_images_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=n), batches))
-                    for j in range(len(all_images_list)):
-                        # print(f"all_images_list[{j}]",all_images_list[j])
-                        utils.save_image(all_images_list[j], str(self.results_folder / f'sample-{j}-{self.step}_sei.png'), nrow = 1)
-                        #utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = 6)
-                    #all_images = torch.cat(all_images_list, dim=0)
-                    #utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = 6)
-                    self.save(milestone)
+                    self.ema_model.eval()
 
+                    milestone = self.step // self.save_and_sample_every
+                    #batches = num_to_groups(20, self.batch_size)
+                    batches = num_to_groups(20,1)
+                    print("BATCHES: --->  ", batches)
+                    all_images_list = list(map(lambda n: self.ema_model.sample(batch_size=n), batches))
+                    #all_images = torch.cat(all_images_list, dim=0)
+                    for j in range(len(all_images_list)):
+                        print(f"all_images_list[{j}]",all_images_list[j])
+                        utils.save_image(all_images_list[j], str(self.results_folder / f'sample-{j}-{self.step}.png'), nrow = 1)
+                        #utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = 6)
+                        #self.save(j)
+                    self.save(milestone)
                 self.step += 1
                 pbar.update(1)
 
